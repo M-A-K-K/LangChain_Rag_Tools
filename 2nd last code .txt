@@ -1,0 +1,276 @@
+
+# from flask import Flask, request, jsonify
+# from transformers import AutoTokenizer, AutoModel
+# from PyPDF2 import PdfReader
+# import faiss
+# import numpy as np
+# import torch
+# from llama_index.llms.together import TogetherLLM
+# import os
+
+# app = Flask(__name__)
+
+# # Initialize tokenizer and model
+# tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+# model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+
+# # Initialize TogetherLLM client
+# api_key = "e133e96deb2acc87154e45fefda61e111b331ece52d2c27b5f4118b27d8f5bcd"
+# llm = TogetherLLM(model="mistralai/Mixtral-8x7B-Instruct-v0.1", api_key=api_key)
+
+# # Initialize FAISS index and indexed PDF texts
+# index = faiss.IndexFlatL2(384)  # 384 is the dimension of the embeddings from all-MiniLM-L6-v2
+# indexed_texts = []  # Store texts corresponding to embeddings
+
+# # Function to extract text from PDF
+# def extract_text_from_pdf(pdf_path):
+#     with open(pdf_path, 'rb') as file:
+#         reader = PdfReader(file)
+#         text = ""
+#         for page in reader.pages:
+#             text += page.extract_text()
+#     return text
+
+# # Function to create semantic embeddings using model
+# def create_semantic_embeddings(text):
+#     inputs = tokenizer([text], return_tensors='pt', padding=True, truncation=True)
+#     with torch.no_grad():
+#         outputs = model(**inputs)
+#         embeddings = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
+#         embeddings = np.atleast_2d(embeddings)
+#     return embeddings
+
+# # Route to create embeddings from a PDF file
+# @app.route('/create_embeddings', methods=['POST'])
+# def create_embeddings():
+#     if 'pdf_path' not in request.json:
+#         return jsonify({'error': 'Missing PDF filename in request body'}), 400
+    
+#     pdf_filename = request.json['pdf_path']
+#     pdf_path = os.path.join(os.path.dirname(__file__), pdf_filename)
+    
+#     if not os.path.exists(pdf_path):
+#         return jsonify({'error': f'PDF file {pdf_filename} not found'}), 404
+    
+#     extracted_text = extract_text_from_pdf(pdf_path)
+#     semantic_embeddings = create_semantic_embeddings(extracted_text)
+    
+#     # Add to existing index
+#     index.add(semantic_embeddings.astype('float32'))
+#     indexed_texts.append(extracted_text)
+    
+#     return jsonify({'semantic_embeddings': semantic_embeddings.tolist()}), 200
+
+
+# @app.route('/generate_completion', methods=['POST'])
+# def generate_completion():
+#     data = request.json
+#     if 'question' not in data:
+#         return jsonify({"error": "Missing question in request body"}), 400
+
+#     question = data['question']
+
+#     # Generate embeddings for the question
+#     question_embeddings = create_semantic_embeddings(question)
+    
+#     # Check if index is initialized
+#     if index.ntotal == 0:
+#         return jsonify({"error": "Embeddings not indexed. Please call /create_embeddings first."}), 400
+    
+#     # Search in the FAISS index for the closest embeddings
+#     D, I = index.search(question_embeddings.astype('float32'), k=1)
+    
+#     # Check if no embeddings found
+#     if len(I) == 0 or len(I[0]) == 0:
+#         return jsonify({"error": "No embeddings found in the index."}), 404
+    
+#     # Get the corresponding text
+#     text_index = I[0][0]
+#     if text_index >= len(indexed_texts):
+#         return jsonify({"error": "Indexed text not found."}), 500
+    
+#     extracted_text = indexed_texts[text_index]
+    
+#     # Use TogetherLLM model for response generation
+#     try:
+#         response = llm.complete(prompt=extracted_text)
+        
+#         # Log the response and its type for debugging
+#         response_type = type(response).__name__
+#         print(f"Response Type: {response_type}")
+#         print(f"Response: {response}")
+
+#         # Treat the response as plain text
+#         response_text = str(response).strip()
+        
+#         if response_text:
+#             return jsonify({"response": response_text}), 200
+#         else:
+#             return jsonify({"error": "Failed to generate response. Invalid response format."}), 500
+    
+#     except Exception as e:
+#         return jsonify({"error": f"Failed to generate response: {str(e)}"}), 500
+
+
+# if __name__ == '__main__':
+#     app.run(debug=True)
+
+
+
+# import os
+# from flask import Flask, request, jsonify
+# from langchain_community.document_loaders import PyPDFLoader
+# from langchain_community.vectorstores import FAISS
+# from langchain_community.embeddings import OpenAIEmbeddings
+# from langchain_text_splitters import CharacterTextSplitter
+# from langchain.chains import RetrievalQA 
+# import pickle
+# from dotenv import load_dotenv
+# import faiss
+# from langchain.prompts import PromptTemplate
+
+
+# # Load environment variables from the .env file
+# dotenv_path = os.path.join('utils', '.env')
+# load_dotenv(dotenv_path=dotenv_path)
+
+# app = Flask(__name__)
+
+# # File paths for saving and loading embeddings
+# EMBEDDINGS_FILE_PATH = 'faiss_index.pkl'
+
+# # Retrieve API key from environment variables
+# api_key = os.getenv('OPENAI_API_KEY')
+
+# if api_key is None:
+#     raise ValueError("API key not found. Make sure 'OPENAI_API_KEY' is set in your .env file.")
+
+# # Initialize the embedding model
+# embeddings = OpenAIEmbeddings(api_key=api_key)
+
+# # Initialize the index variable
+# index = None
+# docs = []
+
+# @app.route('/create_embeddings', methods=['POST'])
+# def create_embeddings():
+#     global index, docs
+#     data = request.json
+    
+#     print("Received request to create embeddings.")
+    
+#     if 'pdf_path' not in data:
+#         print("Error: Missing PDF path in request body")
+#         return jsonify({'error': 'Missing PDF path in request body'}), 400
+    
+#     pdf_path = data['pdf_path']
+    
+#     print(f"PDF path received: {pdf_path}")
+    
+#     if not os.path.exists(pdf_path):
+#         print("Error: The specified PDF file does not exist.")
+#         return jsonify({'error': 'The specified PDF file does not exist.'}), 400
+
+#     try:
+#         print("Loading PDF document...")
+#         loader = PyPDFLoader(pdf_path)
+#         documents = loader.load()
+#         print(f"Loaded {len(documents)} documents from PDF.")
+        
+#         print("Splitting documents into chunks...")
+#         text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+#         docs = text_splitter.split_documents(documents)
+#         print(f"Split documents into {len(docs)} chunks.")
+        
+#         print("Creating FAISS index...")
+#         index = FAISS.from_documents(docs, embeddings)
+#         print("FAISS index created.")
+        
+#         query1 = "Who is Umer Aftab"
+#         query_ans = index.similarity_search(query1)
+#         print(query_ans[0].page_content)
+#         print("Saving FAISS index to file...")
+#         faiss.write_index(index.index, EMBEDDINGS_FILE_PATH)
+#         print("FAISS index saved successfully.")
+        
+
+#         return jsonify({'message': 'Embeddings created and saved successfully'}), 200
+
+#     except Exception as e:
+#         print(f"Error occurred: {str(e)}")
+#         return jsonify({'error': str(e)}), 500
+    
+
+
+# from langchain.chains import create_retrieval_chain
+# from langchain.chains.combine_documents import create_stuff_documents_chain
+# from langchain_core.prompts import ChatPromptTemplate
+# from langchain_openai import ChatOpenAI
+# import faiss
+
+# @app.route('/generate_completion', methods=['POST'])
+# def generate_completion():
+#     data = request.json
+    
+#     print("Received request to generate completion.")
+    
+#     if 'pdf_path' not in data or 'question' not in data:
+#         print("Error: Missing PDF path or question in request body")
+#         return jsonify({'error': 'Missing PDF path or question in request body'}), 400
+
+#     pdf_path = data['pdf_path']
+#     question = data['question']
+    
+#     print(f"PDF path received: {pdf_path}")
+#     print(f"Question received: {question}")
+    
+#     try:
+#         # Load the FAISS index from the specified file
+#         print("Loading FAISS index from file...")
+#         index = faiss.read_index(EMBEDDINGS_FILE_PATH)
+#         print(f"FAISS index loaded. Number of vectors: {index.ntotal}")
+
+#         # Initialize the vector store with the loaded index
+#         vectorstore = FAISS(index=index, embedding_function=embeddings.embed_documents)
+        
+#         # Create the prompt template
+#         system_prompt = (
+#             "You are an intelligent AI"
+#             "You need to give me exact answer that I am questioning to you"
+#             "If you do not have exact answer or do not find answer say I do not know the aswer"
+#             "Context: {context}"
+#         )
+#         prompt = ChatPromptTemplate.from_messages(
+#             [
+#                 ("system", system_prompt),
+#                 ("human", "{input}"),
+#             ]
+#         )
+        
+#         # Initialize the language model
+#         llm = ChatOpenAI()
+        
+#         # Create the document chain
+#         question_answer_chain = create_stuff_documents_chain(llm, prompt)
+        
+#         # Create the retrieval chain
+#         chain = create_retrieval_chain(vectorstore.as_retriever(), question_answer_chain)
+        
+#         print("Running QA chain...")
+#         # Run the QA chain
+#         response = chain.invoke({"input": question, "context": " ".join([doc.page_content for doc in docs])})
+        
+#         print(f"Response: {response}")
+        
+#         return jsonify({"response": response}), 200
+
+#     except Exception as e:
+#         print(f"Error occurred: {str(e)}")
+#         return jsonify({'error': str(e)}), 500
+
+
+
+
+# if __name__ == '__main__':
+#     app.run(debug=True)
+

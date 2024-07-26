@@ -1,0 +1,136 @@
+
+
+from flask import Flask, request, jsonify
+from transformers import AutoTokenizer, AutoModel
+from PyPDF2 import PdfReader
+import faiss
+import numpy as np
+import torch
+from llama_index.llms.together import TogetherLLM
+import os
+
+app = Flask(__name__)
+
+# Initialize tokenizer and model
+tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+
+# Initialize TogetherLLM client
+api_key = "e133e96deb2acc87154e45fefda61e111b331ece52d2c27b5f4118b27d8f5bcd"
+llm = TogetherLLM(model="mistralai/Mixtral-8x7B-Instruct-v0.1", api_key=api_key)
+
+# Initialize FAISS index and indexed PDF paths
+index = None
+indexed_pdf_paths = []  # Replace with your actual indexed PDF paths
+
+# Function to extract text from PDF
+def extract_text_from_pdf(pdf_path):
+    with open(pdf_path, 'rb') as file:
+        reader = PdfReader(file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text()
+    return text
+
+# Function to create semantic embeddings using model
+def create_semantic_embeddings(text):
+    inputs = tokenizer([text], return_tensors='pt', padding=True, truncation=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        embeddings = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
+        embeddings = np.atleast_2d(embeddings)
+    return embeddings
+
+# Function to build FAISS index
+def build_index(embeddings):
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    embeddings_np = np.array(embeddings).astype('float32')
+    index.add(embeddings_np)
+    return index
+
+# Route to create embeddings from a PDF file
+@app.route('/create_embeddings', methods=['POST'])
+def create_embeddings():
+    global index
+    if 'pdf_path' not in request.json:
+        return jsonify({'error': 'Missing PDF filename in request body'}), 400
+    
+    pdf_filename = request.json['pdf_path']
+    pdf_path = os.path.join(os.path.dirname(__file__), pdf_filename)
+    
+    if not os.path.exists(pdf_path):
+        return jsonify({'error': f'PDF file {pdf_filename} not found'}), 404
+    
+    extracted_text = extract_text_from_pdf(pdf_path)
+    semantic_embeddings = create_semantic_embeddings(extracted_text)
+    
+    # Build FAISS index if not already built
+    if index is None:
+        index = build_index(semantic_embeddings)
+        # Store PDF path for reference
+        indexed_pdf_paths.append(pdf_filename)
+    else:
+        # Add to existing index
+        embeddings_np = np.array(semantic_embeddings).astype('float32')
+        index.add(embeddings_np)
+        indexed_pdf_paths.append(pdf_filename)
+    
+    return jsonify({'semantic_embeddings': semantic_embeddings.tolist()}), 200
+
+
+@app.route('/generate_completion', methods=['POST'])
+def generate_completion():
+    global index
+    data = request.json
+    if 'question' not in data:
+        return jsonify({"error": "Missing question in request body"}), 400
+
+    question = data['question']
+
+    # Generate embeddings for the question
+    question_embeddings = create_semantic_embeddings(question)
+    
+    # Check if index is initialized
+    if index is None:
+        return jsonify({"error": "Embeddings not indexed. Please call /create_embeddings first."}), 400
+    
+    # Search in the FAISS index for the closest embeddings
+    D, I = index.search(question_embeddings.reshape(1, -1), k=10)
+    
+    # Check if no embeddings found
+    if len(I) == 0 or len(I[0]) == 0:
+        return jsonify({"error": "No embeddings found in the index."}), 404
+    
+    # Get the corresponding PDF path
+    if I[0][0] >= len(indexed_pdf_paths):
+        return jsonify({"error": "Indexed PDF path not found."}), 500
+    
+    pdf_filename = indexed_pdf_paths[I[0][0]]
+    
+    # Extract text from the identified PDF
+    pdf_path = os.path.join(os.path.dirname(__file__), pdf_filename)
+    extracted_text = extract_text_from_pdf(pdf_path)
+    
+    # Use TogetherLLM model for response generation
+    try:
+        response = llm.complete(prompt=extracted_text)
+        
+        # Log the response and its type for debugging
+        response_type = type(response).__name__
+        print(f"Response Type: {response_type}")
+        print(f"Response: {response}")
+
+        # Treat the response as plain text
+        response_text = str(response).strip()
+        
+        if response_text:
+            return jsonify({"response": response_text}), 200
+        else:
+            return jsonify({"error": "Failed to generate response. Invalid response format."}), 500
+    
+    except Exception as e:
+        return jsonify({"error": f"Failed to generate response: {str(e)}"}), 500
+
+
+if __name__ == '__main__':
+    app.run(debug=True)

@@ -1,0 +1,6 @@
+Flask
+python-dotenv
+langchain
+openai
+PyPDF2
+faiss-cpu
