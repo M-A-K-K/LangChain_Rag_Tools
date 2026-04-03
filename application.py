@@ -25,7 +25,7 @@ load_dotenv(dotenv_path=dotenv_path)
 openai_api_key = os.getenv('OPENAI_API_KEY')
 
 # Retrieve API key from environment variables
-api_key = os.getenv('OPENAI_API_KEY')  # Replace with OpenAI API key
+api_key = os.getenv('OPENAI_API_KEY')
 if not api_key:
     raise ValueError("OpenAI API key is not set in the environment variables.")
 embedding = OpenAIEmbeddings(openai_api_key=api_key)
